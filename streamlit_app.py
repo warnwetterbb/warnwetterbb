@@ -1,7 +1,9 @@
 import streamlit as st
-from wetterdienst.provider.dwd.forecast import DwdForecastRequest, DwdForecastModel
 import pandas as pd
 import plotly.express as px
+# Korrigierter Import für wetterdienst >= 0.120.0
+from wetterdienst.provider.dwd.mosmix import DwdMosmixRequest, DwdMosmixType
+from wetterdienst.provider.dwd.model import DwdModelRequest
 
 # Seiteneinstellungen
 st.set_page_config(page_title="DWD Wettermodell Viewer", layout="wide")
@@ -17,7 +19,7 @@ parameter_choice = st.sidebar.selectbox(
     ["2m Temperatur", "Niederschlag pro Stunde", "Windböen"]
 )
 
-# Mapping der Parameter auf DWD-Interne Namen
+# Mapping der Parameter auf DWD-Interne Namen (ICON Standard)
 param_map = {
     "2m Temperatur": "temperature_air_mean_200",
     "Niederschlag pro Stunde": "precipitation_height_significant_weather_last_1h",
@@ -25,31 +27,36 @@ param_map = {
 }
 
 # --- Daten abrufen ---
-@st.cache_data(ttl=3600)  # Cache für 1 Stunde, um Server zu schonen
+@st.cache_data(ttl=3600)
 def get_weather_data(model_name, param_name):
-    model = DwdForecastModel.ICON_D2 if model_name == "ICON-D2" else DwdForecastModel.ICON_EU
+    # Auswahl des Modells über den neuen DwdModelRequest
+    # Wir nutzen hier die Point-Request Methode für eine Station (z.B. Berlin-Tegel: 10382)
+    model_id = "icon-d2" if model_name == "ICON-D2" else "icon-eu"
     
-    # Beispiel-Koordinaten (Berlin). 
-    # Hinweis: Für ganze Karten müssten GRIB-Files geladen werden, 
-    # was im Streamlit-Cloud-RAM oft zu schwer ist. Hier nutzen wir Punkt-Vorhersagen.
-    request = DwdForecastRequest(
-        parameter=[param_name],
-        model=model
-    )
-    
-    # Wir suchen nach der Station Berlin-Brandenburg (oder lasse den User wählen)
-    stations = request.filter_by_station_id(station_id="10382") # Berlin
-    return stations.values.all().to_pandas()
+    try:
+        request = DwdModelRequest(
+            parameter=[param_name],
+            model=model_id
+        )
+        
+        # Filter auf eine Station (Berlin)
+        stations = request.filter_by_station_id(station_id="10382")
+        values = stations.values.all()
+        return values.to_pandas()
+    except Exception as e:
+        return pd.DataFrame({"error": [str(e)]})
 
+# --- Hauptteil der App ---
 try:
-    with st.spinner('Lade Daten vom DWD...'):
+    with st.spinner('Lade Modelldaten...'):
         df = get_weather_data(model_choice, param_map[parameter_choice])
 
-    # --- Darstellung ---
-    st.subheader(f"{parameter_choice} - {model_choice} (Station: Berlin)")
-    
-    if not df.empty:
-        # Plotly Chart erstellen
+    if "error" in df.columns:
+        st.error(f"Fehler beim Abrufen der Daten: {df['error'].iloc[0]}")
+    elif not df.empty:
+        st.subheader(f"{parameter_choice} - {model_choice} (Station: Berlin)")
+        
+        # Plotly Chart
         fig = px.line(
             df, 
             x="date", 
@@ -59,12 +66,10 @@ try:
         )
         st.plotly_chart(fig, use_container_width=True)
         
-        # Datentabelle
         with st.expander("Rohdaten anzeigen"):
             st.dataframe(df)
     else:
-        st.warning("Keine Daten für diese Auswahl gefunden.")
+        st.warning("Keine Daten verfügbar. Möglicherweise ist der DWD-Server gerade ausgelastet.")
 
 except Exception as e:
-    st.error(f"Fehler beim Laden der Daten: {e}")
-
+    st.error(f"Ein unerwarteter Fehler ist aufgetreten: {e}")
