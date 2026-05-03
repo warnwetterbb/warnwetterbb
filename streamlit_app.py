@@ -1,91 +1,94 @@
 import streamlit as st
-import folium
-from streamlit_folium import folium_static
+import requests
+from io import BytesIO
 
-# Seiteneinstellungen für Breitbild
-st.set_page_config(page_title="DWD Modellkarten", layout="wide")
+# Seiteneinstellungen
+st.set_page_config(page_title="DWD Modellkarten Statisch", layout="wide")
 
-st.title("🛰️ DWD Modellkarten (ICON)")
+st.title("🗺️ DWD Modellkarten - Statische 2D Ansicht")
 
-# --- Sidebar / Radio Button Menü ---
-st.sidebar.header("Navigation")
+# --- Auswahl-Menüs in der Sidebar (Nur Radio Buttons) ---
+st.sidebar.header("Karten-Konfiguration")
 
-# 1. Region wählen
-region_choice = st.sidebar.radio(
-    "Region auswählen",
-    ["Mitteleuropa", "Deutschland", "Berlin/Brandenburg"]
+region = st.sidebar.radio(
+    "1. Region wählen",
+    ["Deutschland", "Berlin/Brandenburg", "Mitteleuropa"]
 )
 
-# 2. Modell wählen
-model_choice = st.sidebar.radio(
-    "Wettermodell",
-    ["ICON-D2 (Hochauflösend)", "ICON-EU (Europa)"]
+model = st.sidebar.radio(
+    "2. Wettermodell",
+    ["ICON-D2 (Regional)", "ICON-EU (Europa)"]
 )
 
-# 3. Parameter wählen
-param_choice = st.sidebar.radio(
-    "Parameter",
+parameter = st.sidebar.radio(
+    "3. Wetter-Parameter",
     ["2m Temperatur", "Niederschlagsrate", "Windböen"]
 )
 
-# --- Konfiguration der Layer & Koordinaten ---
+# --- Logik für die Karten-Anforderung (WMS) ---
 
-# Koordinaten-Mapping [Lat, Lon, Zoom]
-region_map = {
-    "Mitteleuropa": [50.0, 12.5, 5],
-    "Deutschland": [51.1, 10.4, 6],
-    "Berlin/Brandenburg": [52.4, 13.2, 8]
+# Definition der Bounding-Boxen (West, Süd, Ost, Nord)
+bbox_map = {
+    "Deutschland": "5.8,47.2,15.1,55.1",
+    "Berlin/Brandenburg": "11.5,51.2,15.0,53.8",
+    "Mitteleuropa": "2.0,43.0,22.0,58.0"
 }
 
-# Mapping für DWD WMS Layer Namen
-# Hinweis: Die Namen entsprechen der Struktur auf https://maps.dwd.de
-layer_prefix = "icon-d2" if "D2" in model_choice else "icon-eu"
-param_suffix = {
+# Mapping der Layer-Namen des DWD Geoservers
+layer_base = "icon-d2_germany" if "D2" in model else "icon-eu_europe"
+param_map = {
     "2m Temperatur": "2m_temperature",
     "Niederschlagsrate": "total_precipitation",
     "Windböen": "maximum_wind_gust_10m"
 }
 
-# Vollständiger Layer-Pfad für den DWD Geoserver
-# Beispiel: dwd:icon-d2_germany_single_level_elements_2m_temperature
-dwd_layer = f"dwd:{layer_prefix}_germany_single_level_elements_{param_suffix[param_choice]}"
-if "EU" in model_choice:
-    dwd_layer = f"dwd:{layer_prefix}_europe_single_level_elements_{param_suffix[param_choice]}"
+layer_name = f"dwd:{layer_base}_single_level_elements_{param_map[parameter]}"
 
-# --- Karten-Erstellung ---
+def get_dwd_map(layers, bbox):
+    """Holt die statische Karte als PNG vom DWD Geoserver"""
+    wms_url = "https://maps.dwd.de/geoserver/dwd/wms"
+    params = {
+        "service": "WMS",
+        "version": "1.3.0",
+        "request": "GetMap",
+        "layers": layers,
+        "styles": "",
+        "bbox": bbox,
+        "width": "1200",
+        "height": "800",
+        "srs": "EPSG:4326", # Geografische Projektion
+        "format": "image/png",
+        "transparent": "false"
+    }
+    
+    try:
+        response = requests.get(wms_url, params=params, timeout=10)
+        response.raise_for_status()
+        return response.content
+    except Exception as e:
+        return e
 
-st.subheader(f"Karte: {param_choice} ({model_choice}) - {region_choice}")
+# --- Anzeige ---
+st.subheader(f"Aktuelle Karte: {parameter} | {model} | {region}")
 
-# Karte initialisieren
-m = folium.Map(
-    location=[region_map[region_choice][0], region_map[region_choice][1]],
-    zoom_start=region_map[region_choice][2],
-    tiles="cartodbpositron", # Dezente Hintergrundkarte
-    control_scale=True
-)
+with st.spinner("Generiere Karte vom DWD OpenData Server..."):
+    map_image = get_dwd_map(layer_name, bbox_map[region])
+    
+    if isinstance(map_image, bytes):
+        # Karte anzeigen
+        st.image(map_image, use_container_width=True)
+        
+        # Legende passend dazu laden
+        st.sidebar.markdown("---")
+        st.sidebar.write("**Legende:**")
+        legend_url = f"https://maps.dwd.de/geoserver/dwd/wms?request=GetLegendGraphic&format=image/png&layer={layer_name}"
+        st.sidebar.image(legend_url)
+    else:
+        st.error(f"Fehler beim Laden der Karte: {map_image}")
+        st.info("Hinweis: Stellen Sie sicher, dass die gewählte Kombination (z.B. ICON-D2 für ganz Europa) vom DWD unterstützt wird.")
 
-# WMS Layer vom DWD hinzufügen
-wms_url = "https://maps.dwd.de/geoserver/dwd/wms"
-
-folium.WmsTileLayer(
-    url=wms_url,
-    layers=dwd_layer,
-    fmt="image/png",
-    transparent=True,
-    version="1.3.0",
-    name=f"DWD {param_choice}",
-    overlay=True,
-    control=True,
-    opacity=0.7
-).add_to(m)
-
-# Karte in Streamlit anzeigen
-folium_static(m, width=1200, height=700)
-
-# --- Legende (Optional: Dynamisch vom DWD Server laden) ---
-st.sidebar.markdown("---")
-st.sidebar.info("Die Daten werden in Echtzeit vom DWD Geoserver geladen.")
-
-# Legenden-Grafik einbinden
-legend_url = f"{wms_url}?REQUEST=GetLegendGraphic&VERSION=1.3.0&FORMAT=image/png&LAYER={dwd_layer}"
-st.sidebar.image(legend_url, caption="Legende / Farbskala")
+st.markdown("""
+---
+**Hinweis:** Die Karten zeigen den aktuellsten verfügbaren Modelllauf (Base Time). 
+Für zeitliche Vorhersagen (Forecast Steps) müssten die `time`-Parameter der WMS-Schnittstelle erweitert werden.
+""")
