@@ -1,61 +1,70 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-# Wir nutzen NUR den absolut stabilen Basis-Pfad
-from wetterdienst.provider.dwd.model import DwdModelRequest
+import requests
+from datetime import datetime
 
 # Seiteneinstellungen
-st.set_page_config(page_title="DWD Wetter-Monitor", layout="wide")
+st.set_page_config(page_title="DWD Wettermodell (Brightsky)", layout="wide")
 
-st.title("ICON Wettermodell Viewer")
-st.markdown("---")
+st.title("DWD Wettermodell Monitor")
+st.info("Direktzugriff auf ICON-D2 & ICON-EU via Brightsky API (DWD OpenData)")
 
 # --- Sidebar ---
-st.sidebar.header("Optionen")
-model_choice = st.sidebar.selectbox("Modell", ["icon-d2", "icon-eu"])
-param_choice = st.sidebar.selectbox(
-    "Parameter", 
-    ["temperature_air_mean_200", "precipitation_height_significant_weather_last_1h", "wind_gust_max_last_1h_10m"],
-    format_func=lambda x: "Temperatur" if "temp" in x else ("Niederschlag" if "precip" in x else "Windböen")
-)
+st.sidebar.header("Konfiguration")
+model_choice = st.sidebar.selectbox("Wettermodell", ["icon-d2", "icon-eu"])
+lat = st.sidebar.number_input("Breitengrad (Lat)", value=52.52, step=0.01) # Default Berlin
+lon = st.sidebar.number_input("Längengrad (Lon)", value=13.40, step=0.01)
 
+# --- API Abfrage ---
 @st.cache_data(ttl=3600)
-def fetch_data(m_id, p_id):
-    try:
-        # Direkte Abfrage ohne Umwege über Sub-Packages
-        request = DwdModelRequest(
-            parameter=[p_id],
-            model=m_id
-        )
-        # Suche nach Station Berlin-Brandenburg (ID: 10382)
-        station_data = request.filter_by_station_id(station_id="10382")
-        return station_data.values.all().to_pandas()
-    except Exception as e:
-        return str(e)
-
-# --- Hauptbereich ---
-with st.spinner('Empfange Daten vom DWD...'):
-    result = fetch_data(model_choice, param_choice)
-
-if isinstance(result, str):
-    st.error(f"Kritischer Fehler beim Laden: {result}")
-    st.info("Versuche die Seite in wenigen Minuten neu zu laden. Manchmal ist die API kurzzeitig überlastet.")
-elif result is not None and not result.empty:
-    st.subheader(f"Vorhersage für Berlin (Modell: {model_choice.upper()})")
+def get_weather_data(model, lat, lon):
+    # Brightsky API Endpunkt
+    url = f"https://api.brightsky.dev/weather"
+    params = {
+        "lat": lat,
+        "lon": lon,
+        "date": datetime.now().isoformat(),
+        "last_date": datetime.now().replace(day=datetime.now().day + 2).isoformat(), # 48h Vorschau
+        "dwd_model": model
+    }
     
-    # Chart Erstellung
-    fig = px.line(
-        result, 
-        x="date", 
-        y="value", 
-        labels={"value": "Messwert", "date": "Zeitpunkt (UTC)"},
-        template="plotly_dark"
-    )
-    fig.update_traces(line_color='#00d1b2', mode="lines+markers")
-    st.plotly_chart(fig, use_container_width=True)
+    response = requests.get(url, params=params)
+    if response.status_code == 200:
+        return response.json()
+    else:
+        return None
+
+# --- Datenverarbeitung ---
+data_json = get_weather_data(model_choice, lat, lon)
+
+if data_json and "weather" in data_json:
+    df = pd.DataFrame(data_json["weather"])
+    # Zeitstempel konvertieren
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+
+    # Auswahl der Parameter
+    st.subheader(f"Vorhersage für {lat}, {lon} ({model_choice.upper()})")
     
-    # Tabelle
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric("Temperatur (2m)", f"{df['temperature'].iloc[0]} °C")
+        fig_temp = px.line(df, x="timestamp", y="temperature", title="Temperatur (°C)", template="plotly_dark")
+        st.plotly_chart(fig_temp, use_container_width=True)
+
+    with col2:
+        st.metric("Niederschlag", f"{df['precipitation'].iloc[0]} mm/h")
+        fig_prec = px.bar(df, x="timestamp", y="precipitation", title="Niederschlag (mm/h)", template="plotly_dark")
+        st.plotly_chart(fig_prec, use_container_width=True)
+
+    with col3:
+        # Windböen (wind_gust)
+        st.metric("Windböen", f"{df['wind_gust'].iloc[0]} km/h")
+        fig_wind = px.line(df, x="timestamp", y="wind_gust", title="Windböen (km/h)", template="plotly_dark")
+        st.plotly_chart(fig_wind, use_container_width=True)
+
     with st.expander("Tabellarische Daten"):
-        st.dataframe(result)
+        st.dataframe(df)
 else:
-    st.warning("Keine Daten für diese Kombination verfügbar.")
+    st.error("Fehler beim Abrufen der Daten von der Brightsky API.")
