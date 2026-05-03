@@ -1,70 +1,91 @@
 import streamlit as st
-import pandas as pd
-import plotly.express as px
-import requests
-from datetime import datetime
+import folium
+from streamlit_folium import folium_static
 
-# Seiteneinstellungen
-st.set_page_config(page_title="DWD Wettermodell (Brightsky)", layout="wide")
+# Seiteneinstellungen für Breitbild
+st.set_page_config(page_title="DWD Modellkarten", layout="wide")
 
-st.title("DWD Wettermodell Monitor")
-st.info("Direktzugriff auf ICON-D2 & ICON-EU via Brightsky API (DWD OpenData)")
+st.title("🛰️ DWD Modellkarten (ICON)")
 
-# --- Sidebar ---
-st.sidebar.header("Konfiguration")
-model_choice = st.sidebar.selectbox("Wettermodell", ["icon-d2", "icon-eu"])
-lat = st.sidebar.number_input("Breitengrad (Lat)", value=52.52, step=0.01) # Default Berlin
-lon = st.sidebar.number_input("Längengrad (Lon)", value=13.40, step=0.01)
+# --- Sidebar / Radio Button Menü ---
+st.sidebar.header("Navigation")
 
-# --- API Abfrage ---
-@st.cache_data(ttl=3600)
-def get_weather_data(model, lat, lon):
-    # Brightsky API Endpunkt
-    url = f"https://api.brightsky.dev/weather"
-    params = {
-        "lat": lat,
-        "lon": lon,
-        "date": datetime.now().isoformat(),
-        "last_date": datetime.now().replace(day=datetime.now().day + 2).isoformat(), # 48h Vorschau
-        "dwd_model": model
-    }
-    
-    response = requests.get(url, params=params)
-    if response.status_code == 200:
-        return response.json()
-    else:
-        return None
+# 1. Region wählen
+region_choice = st.sidebar.radio(
+    "Region auswählen",
+    ["Mitteleuropa", "Deutschland", "Berlin/Brandenburg"]
+)
 
-# --- Datenverarbeitung ---
-data_json = get_weather_data(model_choice, lat, lon)
+# 2. Modell wählen
+model_choice = st.sidebar.radio(
+    "Wettermodell",
+    ["ICON-D2 (Hochauflösend)", "ICON-EU (Europa)"]
+)
 
-if data_json and "weather" in data_json:
-    df = pd.DataFrame(data_json["weather"])
-    # Zeitstempel konvertieren
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
+# 3. Parameter wählen
+param_choice = st.sidebar.radio(
+    "Parameter",
+    ["2m Temperatur", "Niederschlagsrate", "Windböen"]
+)
 
-    # Auswahl der Parameter
-    st.subheader(f"Vorhersage für {lat}, {lon} ({model_choice.upper()})")
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.metric("Temperatur (2m)", f"{df['temperature'].iloc[0]} °C")
-        fig_temp = px.line(df, x="timestamp", y="temperature", title="Temperatur (°C)", template="plotly_dark")
-        st.plotly_chart(fig_temp, use_container_width=True)
+# --- Konfiguration der Layer & Koordinaten ---
 
-    with col2:
-        st.metric("Niederschlag", f"{df['precipitation'].iloc[0]} mm/h")
-        fig_prec = px.bar(df, x="timestamp", y="precipitation", title="Niederschlag (mm/h)", template="plotly_dark")
-        st.plotly_chart(fig_prec, use_container_width=True)
+# Koordinaten-Mapping [Lat, Lon, Zoom]
+region_map = {
+    "Mitteleuropa": [50.0, 12.5, 5],
+    "Deutschland": [51.1, 10.4, 6],
+    "Berlin/Brandenburg": [52.4, 13.2, 8]
+}
 
-    with col3:
-        # Windböen (wind_gust)
-        st.metric("Windböen", f"{df['wind_gust'].iloc[0]} km/h")
-        fig_wind = px.line(df, x="timestamp", y="wind_gust", title="Windböen (km/h)", template="plotly_dark")
-        st.plotly_chart(fig_wind, use_container_width=True)
+# Mapping für DWD WMS Layer Namen
+# Hinweis: Die Namen entsprechen der Struktur auf https://maps.dwd.de
+layer_prefix = "icon-d2" if "D2" in model_choice else "icon-eu"
+param_suffix = {
+    "2m Temperatur": "2m_temperature",
+    "Niederschlagsrate": "total_precipitation",
+    "Windböen": "maximum_wind_gust_10m"
+}
 
-    with st.expander("Tabellarische Daten"):
-        st.dataframe(df)
-else:
-    st.error("Fehler beim Abrufen der Daten von der Brightsky API.")
+# Vollständiger Layer-Pfad für den DWD Geoserver
+# Beispiel: dwd:icon-d2_germany_single_level_elements_2m_temperature
+dwd_layer = f"dwd:{layer_prefix}_germany_single_level_elements_{param_suffix[param_choice]}"
+if "EU" in model_choice:
+    dwd_layer = f"dwd:{layer_prefix}_europe_single_level_elements_{param_suffix[param_choice]}"
+
+# --- Karten-Erstellung ---
+
+st.subheader(f"Karte: {param_choice} ({model_choice}) - {region_choice}")
+
+# Karte initialisieren
+m = folium.Map(
+    location=[region_map[region_choice][0], region_map[region_choice][1]],
+    zoom_start=region_map[region_choice][2],
+    tiles="cartodbpositron", # Dezente Hintergrundkarte
+    control_scale=True
+)
+
+# WMS Layer vom DWD hinzufügen
+wms_url = "https://maps.dwd.de/geoserver/dwd/wms"
+
+folium.WmsTileLayer(
+    url=wms_url,
+    layers=dwd_layer,
+    fmt="image/png",
+    transparent=True,
+    version="1.3.0",
+    name=f"DWD {param_choice}",
+    overlay=True,
+    control=True,
+    opacity=0.7
+).add_to(m)
+
+# Karte in Streamlit anzeigen
+folium_static(m, width=1200, height=700)
+
+# --- Legende (Optional: Dynamisch vom DWD Server laden) ---
+st.sidebar.markdown("---")
+st.sidebar.info("Die Daten werden in Echtzeit vom DWD Geoserver geladen.")
+
+# Legenden-Grafik einbinden
+legend_url = f"{wms_url}?REQUEST=GetLegendGraphic&VERSION=1.3.0&FORMAT=image/png&LAYER={dwd_layer}"
+st.sidebar.image(legend_url, caption="Legende / Farbskala")
